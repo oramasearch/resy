@@ -32,19 +32,10 @@ pub struct CompactS3Object {
     last_modified: i64,
 }
 
-/// Represents a change detected in an S3 bucket
 #[derive(Debug, PartialEq)]
 pub enum Change {
-    /// A new object was added
     Added(S3Object),
-    /// An existing object was modified
-    Modified {
-        /// Previous state of the object
-        old: S3Object,
-        /// Current state of the object
-        new: S3Object,
-    },
-    /// An object was deleted
+    Modified { old: S3Object, new: S3Object },
     Deleted(S3Object),
 }
 
@@ -52,12 +43,9 @@ pub type ChangeStream<'a> = Pin<
     Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
 >;
 
-/// Error type for S3Builder
 #[derive(Debug)]
 pub enum S3BuilderError {
-    /// A required field was not set
     MissingField(&'static str),
-    /// Database error during initialization
     SqlxError(sqlx::Error),
 }
 
@@ -78,6 +66,12 @@ impl From<sqlx::Error> for S3BuilderError {
     }
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct S3Credentials {
+    access_key_id: SecretString,
+    secret_access_key: SecretString,
+}
+
 /// Builder for configuring an S3 client
 ///
 /// # Example
@@ -93,18 +87,12 @@ impl From<sqlx::Error> for S3BuilderError {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct S3Builder {
     bucket: Option<String>,
-    #[zeroize(skip)]
     region: Option<String>,
-    access_key_id: Option<SecretString>,
-    secret_access_key: Option<SecretString>,
-    #[zeroize(skip)]
+    credentials: Option<S3Credentials>,
     endpoint_url: Option<String>,
-    #[zeroize(skip)]
     page_size: Option<i32>,
-    #[zeroize(skip)]
     db_path: Option<std::path::PathBuf>,
 }
 
@@ -119,10 +107,9 @@ impl S3Builder {
         Self {
             bucket: None,
             region: None,
-            access_key_id: None,
-            secret_access_key: None,
+            credentials: None,
             endpoint_url: None,
-            page_size: Some(1000), // Default page size
+            page_size: Some(1000),
             db_path: None,
         }
     }
@@ -142,8 +129,10 @@ impl S3Builder {
         access_key_id: impl Into<String>,
         secret_access_key: impl Into<String>,
     ) -> Self {
-        self.access_key_id = Some(SecretString::new(access_key_id.into().into()));
-        self.secret_access_key = Some(SecretString::new(secret_access_key.into().into()));
+        self.credentials = Some(S3Credentials {
+            access_key_id: SecretString::new(access_key_id.into().into()),
+            secret_access_key: SecretString::new(secret_access_key.into().into()),
+        });
         self
     }
 
@@ -171,18 +160,14 @@ impl S3Builder {
             .region
             .take()
             .ok_or(S3BuilderError::MissingField("region"))?;
-        let access_key_id = self
-            .access_key_id
-            .take()
-            .ok_or(S3BuilderError::MissingField("credentials"))?;
-        let secret_access_key = self
-            .secret_access_key
+        let credentials = self
+            .credentials
             .take()
             .ok_or(S3BuilderError::MissingField("credentials"))?;
 
         let credentials = Credentials::new(
-            access_key_id.expose_secret(),
-            secret_access_key.expose_secret(),
+            credentials.access_key_id.expose_secret(),
+            credentials.secret_access_key.expose_secret(),
             None,
             None,
             "resy",
@@ -401,8 +386,8 @@ impl S3 {
                             return;
                         }
 
-                        if change.is_some() {
-                            if let Err(e) = sqlx::query(
+                        if change.is_some()
+                            && let Err(e) = sqlx::query(
                                 "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
                                  VALUES (?1, ?2, ?3, ?4, 1)"
                             )
@@ -416,7 +401,6 @@ impl S3 {
                                 yield Err(e.into());
                                 return;
                             }
-                        }
                     }
 
                     if let Some(change) = change {

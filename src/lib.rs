@@ -5,7 +5,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```no_run
+//! ```
 //! use resy::s3::S3;
 //! use resy::Change;
 //! use tokio_stream::StreamExt;
@@ -34,7 +34,6 @@
 
 pub mod s3;
 
-// Re-export common types at the root for easy access
 pub use s3::{Change, S3Object};
 
 use futures_core::Stream;
@@ -45,7 +44,6 @@ use std::path::Path;
 /// This trait enables generic code to work with different data sources
 /// (S3, Snowflake, etc.) in a uniform way.
 pub trait DataSource {
-    /// The type of change this data source produces
     type Change;
 
     /// Stream changes from the data source, using the specified database path for state tracking.
