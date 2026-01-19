@@ -202,7 +202,7 @@ impl S3 {
     }
 
     pub async fn create_state_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
-        let db_url = format!("sqlite:{}", db_path.display());
+        let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
         let pool = SqlitePool::connect(&db_url).await?;
 
         sqlx::query(
