@@ -478,6 +478,19 @@ impl S3 {
     }
 }
 
+// Implement DataSource trait for S3
+impl crate::DataSource for S3 {
+    type Change = Change;
+
+    fn stream_changes(
+        &self,
+        db_path: Option<&Path>,
+    ) -> impl Stream<Item = Result<Self::Change, Box<dyn std::error::Error + Send + Sync>>> + Send
+    {
+        S3::stream_changes(self, db_path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
