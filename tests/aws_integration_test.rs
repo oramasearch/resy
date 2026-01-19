@@ -63,7 +63,7 @@ async fn test_stream_diff_and_update() {
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 
-    let s3 = resy::remotes::aws::S3::from_client(s3_client.clone(), bucket_name.to_string());
+    let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string());
 
     // 1. Initial check: No changes
     let mut stream = s3.stream_diff_and_update(db_path);
@@ -95,7 +95,7 @@ async fn test_stream_diff_and_update() {
 
     assert_eq!(changes.len(), 1);
     match &changes[0] {
-        resy::remotes::aws::Change::Added(obj) => {
+        resy::Change::Added(obj) => {
             assert_eq!(obj.key, key);
             assert_eq!(obj.size, content.len() as i64);
         }
@@ -123,7 +123,7 @@ async fn test_stream_diff_and_update() {
 
     assert_eq!(changes.len(), 1);
     match &changes[0] {
-        resy::remotes::aws::Change::Modified { old, new } => {
+        resy::Change::Modified { old, new } => {
             assert_eq!(new.key, key);
             assert_eq!(old.size, content.len() as i64);
             assert_eq!(new.size, updated_content.len() as i64);
@@ -148,7 +148,7 @@ async fn test_stream_diff_and_update() {
 
     assert_eq!(changes.len(), 1);
     match &changes[0] {
-        resy::remotes::aws::Change::Deleted(obj) => {
+        resy::Change::Deleted(obj) => {
             assert_eq!(obj.key, key);
             assert_eq!(obj.size, updated_content.len() as i64);
         }
@@ -170,7 +170,7 @@ async fn test_stream_stops_at_first_error() {
             .build(),
     );
 
-    let s3 = resy::remotes::aws::S3::from_client(s3_client, "test-bucket".to_string());
+    let s3 = resy::s3::S3::from_client(s3_client, "test-bucket".to_string());
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 
