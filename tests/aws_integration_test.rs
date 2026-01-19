@@ -63,7 +63,7 @@ async fn test_stream_diff_and_update() {
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 
-    let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string());
+    let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), None);
 
     // 1. Initial check: No changes
     let mut stream = s3.stream_diff_and_update(db_path);
@@ -170,7 +170,7 @@ async fn test_stream_stops_at_first_error() {
             .build(),
     );
 
-    let s3 = resy::s3::S3::from_client(s3_client, "test-bucket".to_string());
+    let s3 = resy::s3::S3::from_client(s3_client, "test-bucket".to_string(), None);
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 

@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Added: {} ({} bytes)", obj.key, obj.size);
                 }
                 Change::Modified { old, new } => {
-                    println!("Modified: {} ({} -> {} bytes)", 
+                    println!("Modified: {} ({} -> {} bytes)",
                         new.key, old.size, new.size);
                 }
                 Change::Deleted(obj) => {
@@ -60,7 +60,7 @@ let s3 = S3::builder()
     .region("us-west-2")              // Required
     .credentials(key, secret)         // Required
     .endpoint("http://localhost:4566") // Optional: for LocalStack/MinIO
-    .page_size(500)                   // Optional: S3 pagination size (default: 1000)
+    .batch_size(500)                   // Optional: S3 pagination size (default: 1000)
     .db_path("custom.db")             // Optional: custom state DB path
     .build()
     .await?;

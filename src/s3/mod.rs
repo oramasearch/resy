@@ -12,6 +12,8 @@ use std::path::Path;
 use std::pin::Pin;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+const DEFAULT_BATCH_SIZE: i32 = 1000;
+
 /// Represents an S3 object with its metadata
 #[derive(Clone, Debug, PartialEq)]
 pub struct S3Object {
@@ -63,7 +65,7 @@ pub struct S3Builder {
     region: Option<String>,
     credentials: Option<S3Credentials>,
     endpoint_url: Option<String>,
-    page_size: Option<i32>,
+    batch_size: Option<i32>,
 }
 
 impl Default for S3Builder {
@@ -79,7 +81,7 @@ impl S3Builder {
             region: None,
             credentials: None,
             endpoint_url: None,
-            page_size: Some(1000),
+            batch_size: Some(DEFAULT_BATCH_SIZE),
         }
     }
 
@@ -110,8 +112,8 @@ impl S3Builder {
         self
     }
 
-    pub fn page_size(mut self, size: i32) -> Self {
-        self.page_size = Some(size);
+    pub fn batch_size(mut self, size: i32) -> Self {
+        self.batch_size = Some(size);
         self
     }
 
@@ -153,7 +155,7 @@ impl S3Builder {
         Ok(S3 {
             client: s3_client,
             bucket,
-            page_size: self.page_size.unwrap_or(1000),
+            batch_size: self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
         })
     }
 }
@@ -184,7 +186,7 @@ impl S3Builder {
 pub struct S3 {
     client: Client,
     bucket: String,
-    page_size: i32,
+    batch_size: i32,
 }
 
 impl S3 {
@@ -194,11 +196,13 @@ impl S3 {
     }
 
     /// Create an S3 instance from an existing AWS SDK S3 client
-    pub fn from_client(client: Client, bucket: String) -> Self {
+    pub fn from_client(client: Client, bucket: String, batch_size: Option<i32>) -> Self {
+        let batch_size = batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+
         Self {
             client,
             bucket,
-            page_size: 1000,
+            batch_size,
         }
     }
 
@@ -246,7 +250,7 @@ impl S3 {
         let db_path = db_path.to_path_buf();
         let bucket = self.bucket.clone();
         let client = self.client.clone();
-        let page_size = self.page_size;
+        let batch_size = self.batch_size;
 
         Box::pin(stream! {
             let pool = match Self::create_state_db(&db_path).await {
@@ -282,7 +286,7 @@ impl S3 {
 
             let mut continuation_token: Option<String> = None;
             loop {
-                let mut request = client.list_objects_v2().bucket(&bucket).max_keys(page_size);
+                let mut request = client.list_objects_v2().bucket(&bucket).max_keys(batch_size);
                 if let Some(token) = continuation_token.take() {
                     request = request.continuation_token(token);
                 }
@@ -704,7 +708,7 @@ mod tests {
         assert!(s3.is_ok());
         let s3 = s3.unwrap();
         assert_eq!(s3.bucket, "test-bucket");
-        assert_eq!(s3.page_size, 1000); // default
+        assert_eq!(s3.batch_size, 1000); // default
     }
 
     #[tokio::test]
@@ -714,13 +718,13 @@ mod tests {
             .region("us-west-2")
             .credentials("test-key", "test-secret")
             .endpoint("http://localhost:4566")
-            .page_size(500)
+            .batch_size(500)
             .build()
             .await;
 
         assert!(s3.is_ok());
         let s3 = s3.unwrap();
-        assert_eq!(s3.page_size, 500);
+        assert_eq!(s3.batch_size, 500);
     }
 
     #[tokio::test]

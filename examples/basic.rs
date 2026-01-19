@@ -10,9 +10,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .region("us-east-1")
         .credentials("AKIA...", "secret...")
         // Optional: configure endpoint for LocalStack or MinIO
-        // .endpoint("http://localhost:4566")
+        .endpoint("http://localhost:4566")
         // Optional: configure page size for pagination
-        // .page_size(500)
+        .batch_size(500)
         .build()
         .await?;
 
