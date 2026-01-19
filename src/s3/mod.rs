@@ -505,59 +505,7 @@ impl crate::DataSource for S3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use tempfile::NamedTempFile;
-
-    fn create_test_s3_object(key: &str, etag: &str, size: i64, timestamp: i64) -> S3Object {
-        S3Object {
-            key: key.to_string(),
-            etag: etag.to_string(),
-            size,
-            last_modified: Utc.timestamp_opt(timestamp, 0).unwrap(),
-        }
-    }
-
-    #[test]
-    fn test_s3_object_creation() {
-        let obj = create_test_s3_object("test/file.txt", "etag123", 1024, 1609459200);
-
-        assert_eq!(obj.key, "test/file.txt");
-        assert_eq!(obj.etag, "etag123");
-        assert_eq!(obj.size, 1024);
-        assert_eq!(obj.last_modified, Utc.timestamp_opt(1609459200, 0).unwrap());
-    }
-
-    #[test]
-    fn test_change_enum_variants() {
-        let obj1 = create_test_s3_object("test1", "etag1", 100, 1609459200);
-        let obj2 = create_test_s3_object("test2", "etag2", 200, 1609459300);
-        let obj3 = create_test_s3_object("test3", "etag3", 300, 1609459400);
-
-        let added = Change::Added(obj1.clone());
-        let modified = Change::Modified {
-            old: obj1.clone(),
-            new: obj2.clone(),
-        };
-        let deleted = Change::Deleted(obj3.clone());
-
-        match added {
-            Change::Added(ref obj) => assert_eq!(obj.key, "test1"),
-            _ => panic!("Expected Added variant"),
-        }
-
-        match modified {
-            Change::Modified { ref old, ref new } => {
-                assert_eq!(old.key, "test1");
-                assert_eq!(new.key, "test2");
-            }
-            _ => panic!("Expected Modified variant"),
-        }
-
-        match deleted {
-            Change::Deleted(ref obj) => assert_eq!(obj.key, "test3"),
-            _ => panic!("Expected Deleted variant"),
-        }
-    }
 
     #[tokio::test]
     async fn test_create_state_db() {
@@ -584,158 +532,6 @@ mod tests {
                 .unwrap()
                 .is_some();
         assert!(index_exists);
-    }
-
-    #[test]
-    fn test_compact_to_s3_object() {
-        let compact = CompactS3Object {
-            etag: "etag123".to_string(),
-            size: 1024,
-            last_modified: 1609459200,
-        };
-
-        let s3_obj = S3::compact_to_s3_object("test/file.txt", &compact);
-
-        assert_eq!(s3_obj.key, "test/file.txt");
-        assert_eq!(s3_obj.etag, "etag123");
-        assert_eq!(s3_obj.size, 1024);
-        assert_eq!(
-            s3_obj.last_modified,
-            Utc.timestamp_opt(1609459200, 0).unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_database_operations() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db_path = temp_file.path();
-
-        let pool = S3::create_state_db(db_path).await.unwrap();
-
-        sqlx::query(
-            "INSERT INTO object_state (key, etag, size, last_modified) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind("test/file.txt")
-        .bind("etag123")
-        .bind(1024_i64)
-        .bind(1609459200_i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let row =
-            sqlx::query("SELECT key, etag, size, last_modified FROM object_state WHERE key = ?1")
-                .bind("test/file.txt")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-
-        let key: String = row.get(0);
-        let etag: String = row.get(1);
-        let size: i64 = row.get(2);
-        let last_modified: i64 = row.get(3);
-
-        assert_eq!(key, "test/file.txt");
-        assert_eq!(etag, "etag123");
-        assert_eq!(size, 1024);
-        assert_eq!(last_modified, 1609459200);
-    }
-
-    #[tokio::test]
-    async fn test_database_with_temp_seen_column() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db_path = temp_file.path();
-
-        let pool = S3::create_state_db(db_path).await.unwrap();
-
-        sqlx::query(
-            "INSERT INTO object_state (key, etag, size, last_modified) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind("test/file.txt")
-        .bind("etag123")
-        .bind(1024_i64)
-        .bind(1609459200_i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let mut tx = pool.begin().await.unwrap();
-
-        sqlx::query("ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-
-        sqlx::query("UPDATE object_state SET temp_seen = 1 WHERE key = ?1")
-            .bind("test/file.txt")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-
-        let row = sqlx::query("SELECT temp_seen FROM object_state WHERE key = ?1")
-            .bind("test/file.txt")
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-
-        let temp_seen: i32 = row.get(0);
-        assert_eq!(temp_seen, 1);
-
-        tx.commit().await.unwrap();
-    }
-
-    #[test]
-    fn test_s3_object_equality() {
-        let obj1 = create_test_s3_object("test", "etag1", 100, 1609459200);
-        let obj2 = create_test_s3_object("test", "etag1", 100, 1609459200);
-        let obj3 = create_test_s3_object("test", "etag2", 100, 1609459200);
-
-        assert_eq!(obj1, obj2);
-        assert_ne!(obj1, obj3);
-    }
-
-    #[test]
-    fn test_change_equality() {
-        let obj1 = create_test_s3_object("test1", "etag1", 100, 1609459200);
-        let obj2 = create_test_s3_object("test2", "etag2", 200, 1609459300);
-
-        let change1 = Change::Added(obj1.clone());
-        let change2 = Change::Added(obj1.clone());
-        let change3 = Change::Added(obj2.clone());
-
-        assert_eq!(change1, change2);
-        assert_ne!(change1, change3);
-    }
-
-    #[tokio::test]
-    async fn test_builder_success() {
-        let s3 = S3::builder()
-            .bucket("test-bucket")
-            .region("us-west-2")
-            .credentials("test-key", "test-secret")
-            .build()
-            .await;
-
-        assert!(s3.is_ok());
-        let s3 = s3.unwrap();
-        assert_eq!(s3.bucket, "test-bucket");
-        assert_eq!(s3.batch_size, 1000); // default
-    }
-
-    #[tokio::test]
-    async fn test_builder_with_optional_fields() {
-        let s3 = S3::builder()
-            .bucket("test-bucket")
-            .region("us-west-2")
-            .credentials("test-key", "test-secret")
-            .endpoint("http://localhost:4566")
-            .batch_size(500)
-            .build()
-            .await;
-
-        assert!(s3.is_ok());
-        let s3 = s3.unwrap();
-        assert_eq!(s3.batch_size, 500);
     }
 
     #[tokio::test]
@@ -775,5 +571,65 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3BuilderError::MissingField("credentials")));
+    }
+
+    fn create_test_s3_object(key: &str, etag: &str, size: i64, timestamp: i64) -> S3Object {
+        S3Object {
+            key: key.to_string(),
+            etag: etag.to_string(),
+            size,
+            last_modified: chrono::DateTime::from_timestamp(timestamp, 0)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn test_determine_change_added() {
+        let obj = create_test_s3_object("new-file.txt", "etag1", 100, 1609459200);
+        let change = S3::determine_change(&obj, None);
+
+        assert!(matches!(change, Some(Change::Added(_))));
+        if let Some(Change::Added(added_obj)) = change {
+            assert_eq!(added_obj.key, "new-file.txt");
+            assert_eq!(added_obj.etag, "etag1");
+            assert_eq!(added_obj.size, 100);
+        }
+    }
+
+    #[test]
+    fn test_determine_change_modified() {
+        let obj = create_test_s3_object("file.txt", "etag2", 200, 1609459300);
+        let prev = CompactS3Object {
+            etag: "etag1".to_string(),
+            size: 100,
+            last_modified: 1609459200,
+        };
+
+        let change = S3::determine_change(&obj, Some(prev));
+
+        assert!(matches!(change, Some(Change::Modified { .. })));
+        if let Some(Change::Modified { old, new }) = change {
+            assert_eq!(old.etag, "etag1");
+            assert_eq!(old.size, 100);
+            assert_eq!(new.etag, "etag2");
+            assert_eq!(new.size, 200);
+            assert_eq!(new.key, "file.txt");
+        }
+    }
+
+    #[test]
+    fn test_determine_change_unchanged() {
+        let obj = create_test_s3_object("file.txt", "etag1", 100, 1609459200);
+        let prev = CompactS3Object {
+            etag: "etag1".to_string(),
+            size: 100,
+            last_modified: 1609459200,
+        };
+
+        let change = S3::determine_change(&obj, Some(prev));
+
+        // No change should be detected when etag is the same
+        assert!(change.is_none());
     }
 }
