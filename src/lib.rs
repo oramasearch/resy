@@ -1,3 +1,37 @@
+//! # Resy - Remote Sync Change Detection Library
+//!
+//! Resy monitors remote data sources (currently S3) and streams detected changes
+//! to consuming applications.
+//!
+//! ## Quick Start
+//!
+//! ```no_run
+//! use resy::s3::S3;
+//! use resy::Change;
+//! use tokio_stream::StreamExt;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let s3 = S3::builder()
+//!         .bucket("my-bucket")
+//!         .region("us-east-1")
+//!         .credentials("key", "secret")
+//!         .build()
+//!         .await?;
+//!
+//!     let mut stream = s3.stream_changes(None);
+//!     while let Some(result) = stream.next().await {
+//!         match result {
+//!             Ok(Change::Added(obj)) => println!("Added: {}", obj.key),
+//!             Ok(Change::Modified { new, .. }) => println!("Modified: {}", new.key),
+//!             Ok(Change::Deleted(obj)) => println!("Deleted: {}", obj.key),
+//!             Err(e) => eprintln!("Error: {}", e),
+//!         }
+//!     }
+//!     Ok(())
+//! }
+//! ```
+
 pub mod s3;
 
 // Re-export common types at the root for easy access
@@ -7,10 +41,16 @@ use futures_core::Stream;
 use std::path::Path;
 
 /// Trait for data sources that can stream changes
+///
+/// This trait enables generic code to work with different data sources
+/// (S3, Snowflake, etc.) in a uniform way.
 pub trait DataSource {
+    /// The type of change this data source produces
     type Change;
 
-    /// Stream changes from the data source, using the specified database path for state tracking
+    /// Stream changes from the data source, using the specified database path for state tracking.
+    ///
+    /// If `db_path` is `None`, a default path will be generated based on the data source configuration.
     fn stream_changes(
         &self,
         db_path: Option<&Path>,

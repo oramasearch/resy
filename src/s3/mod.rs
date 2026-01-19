@@ -12,11 +12,16 @@ use std::path::Path;
 use std::pin::Pin;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Represents an S3 object with its metadata
 #[derive(Clone, Debug, PartialEq)]
 pub struct S3Object {
+    /// S3 object key (path)
     pub key: String,
+    /// ETag for version tracking
     pub etag: String,
+    /// Object size in bytes
     pub size: i64,
+    /// Last modification timestamp
     pub last_modified: DateTime<Utc>,
 }
 
@@ -27,10 +32,19 @@ pub struct CompactS3Object {
     last_modified: i64,
 }
 
+/// Represents a change detected in an S3 bucket
 #[derive(Debug, PartialEq)]
 pub enum Change {
+    /// A new object was added
     Added(S3Object),
-    Modified { old: S3Object, new: S3Object },
+    /// An existing object was modified
+    Modified {
+        /// Previous state of the object
+        old: S3Object,
+        /// Current state of the object
+        new: S3Object,
+    },
+    /// An object was deleted
     Deleted(S3Object),
 }
 
@@ -38,9 +52,12 @@ pub type ChangeStream<'a> = Pin<
     Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
 >;
 
+/// Error type for S3Builder
 #[derive(Debug)]
 pub enum S3BuilderError {
+    /// A required field was not set
     MissingField(&'static str),
+    /// Database error during initialization
     SqlxError(sqlx::Error),
 }
 
@@ -61,6 +78,21 @@ impl From<sqlx::Error> for S3BuilderError {
     }
 }
 
+/// Builder for configuring an S3 client
+///
+/// # Example
+/// ```no_run
+/// # use resy::s3::S3;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let s3 = S3::builder()
+///     .bucket("my-bucket")
+///     .region("us-west-2")
+///     .credentials("access_key", "secret_key")
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct S3Builder {
     bucket: Option<String>,
@@ -178,6 +210,28 @@ impl S3Builder {
     }
 }
 
+/// S3 client for monitoring bucket changes
+///
+/// # Example
+/// ```no_run
+/// # use resy::s3::S3;
+/// # use tokio_stream::StreamExt;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let s3 = S3::builder()
+///     .bucket("my-bucket")
+///     .region("us-west-2")
+///     .credentials("key", "secret")
+///     .build()
+///     .await?;
+///     
+/// let mut changes = s3.stream_changes(None);
+/// while let Some(change) = changes.next().await {
+///     // Handle change
+/// #   break;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct S3 {
     client: Client,
