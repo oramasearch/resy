@@ -2959,6 +2959,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "testcontainers",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "zeroize",

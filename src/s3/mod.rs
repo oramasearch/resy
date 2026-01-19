@@ -43,27 +43,13 @@ pub type ChangeStream<'a> = Pin<
     Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
 >;
 
-#[derive(Debug)]
+/// Error type for S3Builder
+#[derive(Debug, thiserror::Error)]
 pub enum S3BuilderError {
+    #[error("Missing required field: {0}")]
     MissingField(&'static str),
-    SqlxError(sqlx::Error),
-}
-
-impl std::fmt::Display for S3BuilderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            S3BuilderError::MissingField(field) => write!(f, "Missing required field: {}", field),
-            S3BuilderError::SqlxError(e) => write!(f, "Database error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for S3BuilderError {}
-
-impl From<sqlx::Error> for S3BuilderError {
-    fn from(e: sqlx::Error) -> Self {
-        S3BuilderError::SqlxError(e)
-    }
+    #[error("Database error: {0}")]
+    SqlxError(#[from] sqlx::Error),
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -72,21 +58,6 @@ struct S3Credentials {
     secret_access_key: SecretString,
 }
 
-/// Builder for configuring an S3 client
-///
-/// # Example
-/// ```no_run
-/// # use resy::s3::S3;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let s3 = S3::builder()
-///     .bucket("my-bucket")
-///     .region("us-west-2")
-///     .credentials("access_key", "secret_key")
-///     .build()
-///     .await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct S3Builder {
     bucket: Option<String>,
     region: Option<String>,
@@ -198,7 +169,7 @@ impl S3Builder {
 /// S3 client for monitoring bucket changes
 ///
 /// # Example
-/// ```no_run
+/// ```
 /// # use resy::s3::S3;
 /// # use tokio_stream::StreamExt;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
