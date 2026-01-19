@@ -38,77 +38,119 @@ pub type ChangeStream<'a> = Pin<
     Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
 >;
 
+#[derive(Debug)]
+pub enum S3BuilderError {
+    MissingField(&'static str),
+    SqlxError(sqlx::Error),
+}
+
+impl std::fmt::Display for S3BuilderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            S3BuilderError::MissingField(field) => write!(f, "Missing required field: {}", field),
+            S3BuilderError::SqlxError(e) => write!(f, "Database error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for S3BuilderError {}
+
+impl From<sqlx::Error> for S3BuilderError {
+    fn from(e: sqlx::Error) -> Self {
+        S3BuilderError::SqlxError(e)
+    }
+}
+
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct S3Conf {
+pub struct S3Builder {
+    bucket: Option<String>,
     #[zeroize(skip)]
-    pub bucket: String,
+    region: Option<String>,
+    access_key_id: Option<SecretString>,
+    secret_access_key: Option<SecretString>,
     #[zeroize(skip)]
-    pub region: String,
-    pub access_key_id: SecretString,
-    pub secret_access_key: SecretString,
+    endpoint_url: Option<String>,
     #[zeroize(skip)]
-    pub endpoint_url: Option<String>,
+    page_size: Option<i32>,
+    #[zeroize(skip)]
+    db_path: Option<std::path::PathBuf>,
 }
 
-impl S3Conf {
-    pub fn new(
-        bucket: String,
-        access_key_id: String,
-        secret_access_key: String,
-        region: String,
-    ) -> Self {
-        S3Conf {
-            bucket,
-            access_key_id: SecretString::new(access_key_id.into()),
-            secret_access_key: SecretString::new(secret_access_key.into()),
-            region,
+impl Default for S3Builder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl S3Builder {
+    pub fn new() -> Self {
+        Self {
+            bucket: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
             endpoint_url: None,
+            page_size: Some(1000), // Default page size
+            db_path: None,
         }
     }
 
-    pub fn new_with_endpoint(
-        bucket: String,
-        access_key_id: String,
-        secret_access_key: String,
-        region: String,
-        endpoint_url: String,
+    pub fn bucket(mut self, bucket: impl Into<String>) -> Self {
+        self.bucket = Some(bucket.into());
+        self
+    }
+
+    pub fn region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+
+    pub fn credentials(
+        mut self,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
     ) -> Self {
-        S3Conf {
-            bucket,
-            access_key_id: SecretString::new(access_key_id.into()),
-            secret_access_key: SecretString::new(secret_access_key.into()),
-            region,
-            endpoint_url: Some(endpoint_url),
-        }
+        self.access_key_id = Some(SecretString::new(access_key_id.into().into()));
+        self.secret_access_key = Some(SecretString::new(secret_access_key.into().into()));
+        self
     }
 
-    fn get_access_key_id(&self) -> &str {
-        self.access_key_id.expose_secret()
+    pub fn endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint_url = Some(endpoint.into());
+        self
     }
 
-    fn get_secret_access_key(&self) -> &str {
-        self.secret_access_key.expose_secret()
-    }
-}
-
-pub struct S3 {
-    client: Client,
-    bucket: String,
-}
-
-impl S3 {
-    pub async fn new(conf: &S3Conf) -> Self {
-        Self::create_client(conf).await
+    pub fn page_size(mut self, size: i32) -> Self {
+        self.page_size = Some(size);
+        self
     }
 
-    pub fn from_client(client: Client, bucket: String) -> Self {
-        Self { client, bucket }
+    pub fn db_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.db_path = Some(path.into());
+        self
     }
 
-    async fn create_client(conf: &S3Conf) -> Self {
+    pub async fn build(mut self) -> Result<S3, S3BuilderError> {
+        let bucket = self
+            .bucket
+            .take()
+            .ok_or(S3BuilderError::MissingField("bucket"))?;
+        let region = self
+            .region
+            .take()
+            .ok_or(S3BuilderError::MissingField("region"))?;
+        let access_key_id = self
+            .access_key_id
+            .take()
+            .ok_or(S3BuilderError::MissingField("credentials"))?;
+        let secret_access_key = self
+            .secret_access_key
+            .take()
+            .ok_or(S3BuilderError::MissingField("credentials"))?;
+
         let credentials = Credentials::new(
-            conf.get_access_key_id(),
-            conf.get_secret_access_key(),
+            access_key_id.expose_secret(),
+            secret_access_key.expose_secret(),
             None,
             None,
             "resy",
@@ -116,12 +158,10 @@ impl S3 {
 
         let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
             .credentials_provider(SharedCredentialsProvider::new(credentials))
-            .region(Region::new(conf.region.clone()))
+            .region(Region::new(region))
             .behavior_version(BehaviorVersion::latest());
 
-        // ideally we should only use endpoint_url for local testing.
-        // We may want to add a flag to disable it in prod.
-        if let Some(endpoint_url) = &conf.endpoint_url {
+        if let Some(endpoint_url) = &self.endpoint_url {
             s3_config_builder = s3_config_builder.endpoint_url(endpoint_url);
             s3_config_builder = s3_config_builder.force_path_style(true);
         }
@@ -129,9 +169,36 @@ impl S3 {
         let s3_config = s3_config_builder.build();
         let s3_client = Client::from_conf(s3_config);
 
-        Self {
+        Ok(S3 {
             client: s3_client,
-            bucket: conf.bucket.clone(),
+            bucket,
+            page_size: self.page_size.unwrap_or(1000),
+            db_path: self.db_path.take(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct S3 {
+    client: Client,
+    bucket: String,
+    page_size: i32,
+    db_path: Option<std::path::PathBuf>,
+}
+
+impl S3 {
+    /// Create a new S3Builder to configure and build an S3 client
+    pub fn builder() -> S3Builder {
+        S3Builder::new()
+    }
+
+    /// Create an S3 instance from an existing AWS SDK S3 client
+    pub fn from_client(client: Client, bucket: String) -> Self {
+        Self {
+            client,
+            bucket,
+            page_size: 1000,
+            db_path: None,
         }
     }
 
@@ -166,10 +233,23 @@ impl S3 {
         Ok(pool)
     }
 
+    /// Stream changes using the configured or auto-generated database path
+    pub fn stream_changes(&self, db_path: Option<&Path>) -> ChangeStream<'_> {
+        let actual_db_path = db_path
+            .map(|p| p.to_path_buf())
+            .or_else(|| self.db_path.clone())
+            .unwrap_or_else(|| {
+                let bucket_name = self.bucket.replace(['/', '\\', ':'], "_");
+                std::path::PathBuf::from(format!("{}.db", bucket_name))
+            });
+        self.stream_diff_and_update(&actual_db_path)
+    }
+
     pub fn stream_diff_and_update(&self, db_path: &Path) -> ChangeStream<'_> {
         let db_path = db_path.to_path_buf();
         let bucket = self.bucket.clone();
         let client = self.client.clone();
+        let page_size = self.page_size;
 
         Box::pin(stream! {
             let pool = match Self::create_state_db(&db_path).await {
@@ -205,7 +285,7 @@ impl S3 {
 
             let mut continuation_token: Option<String> = None;
             loop {
-                let mut request = client.list_objects_v2().bucket(&bucket).max_keys(1000);
+                let mut request = client.list_objects_v2().bucket(&bucket).max_keys(page_size);
                 if let Some(token) = continuation_token.take() {
                     request = request.continuation_token(token);
                 }
@@ -413,15 +493,6 @@ mod tests {
         }
     }
 
-    fn create_test_s3_conf() -> S3Conf {
-        S3Conf::new(
-            "test-bucket".to_string(),
-            "test-key".to_string(),
-            "test-secret".to_string(),
-            "us-west-2".to_string(),
-        )
-    }
-
     #[test]
     fn test_s3_object_creation() {
         let obj = create_test_s3_object("test/file.txt", "etag123", 1024, 1609459200);
@@ -430,16 +501,6 @@ mod tests {
         assert_eq!(obj.etag, "etag123");
         assert_eq!(obj.size, 1024);
         assert_eq!(obj.last_modified, Utc.timestamp_opt(1609459200, 0).unwrap());
-    }
-
-    #[test]
-    fn test_s3_struct_creation() {
-        let s3 = create_test_s3_conf();
-
-        assert_eq!(s3.bucket, "test-bucket");
-        assert_eq!(s3.region, "us-west-2");
-        assert_eq!(s3.get_access_key_id(), "test-key");
-        assert_eq!(s3.get_secret_access_key(), "test-secret");
     }
 
     #[test]
@@ -622,36 +683,73 @@ mod tests {
         assert_ne!(change1, change3);
     }
 
-    #[test]
-    fn test_s3_with_endpoint() {
-        let s3 = S3Conf::new_with_endpoint(
-            "test-bucket".to_string(),
-            "test-key".to_string(),
-            "test-secret".to_string(),
-            "us-west-2".to_string(),
-            "http://localhost:4566".to_string(),
-        );
+    #[tokio::test]
+    async fn test_builder_success() {
+        let s3 = S3::builder()
+            .bucket("test-bucket")
+            .region("us-west-2")
+            .credentials("test-key", "test-secret")
+            .build()
+            .await;
 
+        assert!(s3.is_ok());
+        let s3 = s3.unwrap();
         assert_eq!(s3.bucket, "test-bucket");
-        assert_eq!(s3.region, "us-west-2");
-        assert_eq!(s3.endpoint_url, Some("http://localhost:4566".to_string()));
-        assert_eq!(s3.get_access_key_id(), "test-key");
-        assert_eq!(s3.get_secret_access_key(), "test-secret");
+        assert_eq!(s3.page_size, 1000); // default
     }
 
-    #[test]
-    fn test_s3_without_endpoint() {
-        let s3 = S3Conf::new(
-            "test-bucket".to_string(),
-            "test-key".to_string(),
-            "test-secret".to_string(),
-            "us-west-2".to_string(),
-        );
+    #[tokio::test]
+    async fn test_builder_with_optional_fields() {
+        let s3 = S3::builder()
+            .bucket("test-bucket")
+            .region("us-west-2")
+            .credentials("test-key", "test-secret")
+            .endpoint("http://localhost:4566")
+            .page_size(500)
+            .build()
+            .await;
 
-        assert_eq!(s3.bucket, "test-bucket");
-        assert_eq!(s3.region, "us-west-2");
-        assert_eq!(s3.endpoint_url, None);
-        assert_eq!(s3.get_access_key_id(), "test-key");
-        assert_eq!(s3.get_secret_access_key(), "test-secret");
+        assert!(s3.is_ok());
+        let s3 = s3.unwrap();
+        assert_eq!(s3.page_size, 500);
+    }
+
+    #[tokio::test]
+    async fn test_builder_missing_bucket() {
+        let result = S3::builder()
+            .region("us-west-2")
+            .credentials("test-key", "test-secret")
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, S3BuilderError::MissingField("bucket")));
+    }
+
+    #[tokio::test]
+    async fn test_builder_missing_region() {
+        let result = S3::builder()
+            .bucket("test-bucket")
+            .credentials("test-key", "test-secret")
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, S3BuilderError::MissingField("region")));
+    }
+
+    #[tokio::test]
+    async fn test_builder_missing_credentials() {
+        let result = S3::builder()
+            .bucket("test-bucket")
+            .region("us-west-2")
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, S3BuilderError::MissingField("credentials")));
     }
 }
