@@ -251,7 +251,11 @@ impl S3 {
             let pool = match Self::create_state_db(&db_path).await {
                 Ok(p) => p,
                 Err(e) => {
-                    yield Err(e.into());
+                    yield Err(format!(
+                        "Failed to create state database at {}: {}",
+                        db_path.display(),
+                        e
+                    ).into());
                     return;
                 }
             };
