@@ -64,7 +64,6 @@ pub struct S3Builder {
     credentials: Option<S3Credentials>,
     endpoint_url: Option<String>,
     page_size: Option<i32>,
-    db_path: Option<std::path::PathBuf>,
 }
 
 impl Default for S3Builder {
@@ -81,7 +80,6 @@ impl S3Builder {
             credentials: None,
             endpoint_url: None,
             page_size: Some(1000),
-            db_path: None,
         }
     }
 
@@ -114,11 +112,6 @@ impl S3Builder {
 
     pub fn page_size(mut self, size: i32) -> Self {
         self.page_size = Some(size);
-        self
-    }
-
-    pub fn db_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.db_path = Some(path.into());
         self
     }
 
@@ -161,7 +154,6 @@ impl S3Builder {
             client: s3_client,
             bucket,
             page_size: self.page_size.unwrap_or(1000),
-            db_path: self.db_path.take(),
         })
     }
 }
@@ -193,7 +185,6 @@ pub struct S3 {
     client: Client,
     bucket: String,
     page_size: i32,
-    db_path: Option<std::path::PathBuf>,
 }
 
 impl S3 {
@@ -208,7 +199,6 @@ impl S3 {
             client,
             bucket,
             page_size: 1000,
-            db_path: None,
         }
     }
 
@@ -245,13 +235,10 @@ impl S3 {
 
     /// Stream changes using the configured or auto-generated database path
     pub fn stream_changes(&self, db_path: Option<&Path>) -> ChangeStream<'_> {
-        let actual_db_path = db_path
-            .map(|p| p.to_path_buf())
-            .or_else(|| self.db_path.clone())
-            .unwrap_or_else(|| {
-                let bucket_name = self.bucket.replace(['/', '\\', ':'], "_");
-                std::path::PathBuf::from(format!("{}.db", bucket_name))
-            });
+        let actual_db_path = db_path.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+            let bucket_name = self.bucket.replace(['/', '\\', ':'], "_");
+            std::path::PathBuf::from(format!("{}.db", bucket_name))
+        });
         self.stream_diff_and_update(&actual_db_path)
     }
 
