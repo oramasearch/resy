@@ -323,50 +323,31 @@ impl S3 {
 
                     let change = Self::determine_change(&current_obj, previous_state.clone());
 
-                    if previous_state.is_none() {
-                        if let Err(e) = sqlx::query(
-                            "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
-                             VALUES (?1, ?2, ?3, ?4, 1)"
-                        )
-                        .bind(&current_obj.key)
-                        .bind(&current_obj.etag)
-                        .bind(current_obj.size)
-                        .bind(current_obj.last_modified.timestamp())
-                        .execute(&mut *tx)
-                        .await
-                        {
-                            yield Err(e.into());
-                            return;
+                    let result = match previous_state {
+                        None => {
+                            // New object: insert into DB and mark as seen
+                            Self::insert_object_state(&mut tx, &current_obj).await
                         }
-                    } else {
-                        if let Err(e) = sqlx::query("UPDATE object_state SET temp_seen = 1 WHERE key = ?1")
-                            .bind(&current_obj.key)
-                            .execute(&mut *tx)
-                            .await
-                        {
-                            yield Err(e.into());
-                            return;
-                        }
+                        Some(_) => {
+                            // Existing object: mark as seen
+                            Self::mark_object_seen(&mut tx, &current_obj.key).await?;
 
-                        if change.is_some()
-                            && let Err(e) = sqlx::query(
-                                "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
-                                 VALUES (?1, ?2, ?3, ?4, 1)"
-                            )
-                            .bind(&current_obj.key)
-                            .bind(&current_obj.etag)
-                            .bind(current_obj.size)
-                            .bind(current_obj.last_modified.timestamp())
-                            .execute(&mut *tx)
-                            .await
-                            {
-                                yield Err(e.into());
-                                return;
+                            // If modified, update the state
+                            if change.is_some() {
+                                Self::insert_object_state(&mut tx, &current_obj).await
+                            } else {
+                                Ok(())
                             }
+                        }
+                    };
+
+                    if let Err(e) = result {
+                        yield Err(e.into());
+                        return;
                     }
 
                     if let Some(change) = change {
-                        yield Ok(change);
+                        yield Ok(change)
                     }
                 }
 
@@ -475,6 +456,36 @@ impl S3 {
                 .unwrap_or_default()
                 .with_timezone(&Utc),
         }
+    }
+
+    /// Insert or update object state in the database with temp_seen=1
+    async fn insert_object_state(
+        conn: &mut sqlx::SqliteConnection,
+        obj: &S3Object,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
+             VALUES (?1, ?2, ?3, ?4, 1)",
+        )
+        .bind(&obj.key)
+        .bind(&obj.etag)
+        .bind(obj.size)
+        .bind(obj.last_modified.timestamp())
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark an object as seen in the current scan
+    async fn mark_object_seen(
+        conn: &mut sqlx::SqliteConnection,
+        key: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE object_state SET temp_seen = 1 WHERE key = ?1")
+            .bind(key)
+            .execute(conn)
+            .await?;
+        Ok(())
     }
 }
 
