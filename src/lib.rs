@@ -41,6 +41,8 @@ pub use s3::{Change, S3Object};
 use futures_core::Stream;
 use std::path::Path;
 
+use std::pin::Pin;
+
 /// Trait for data sources that can stream changes
 ///
 /// This trait enables generic code to work with different data sources
@@ -54,5 +56,5 @@ pub trait DataSource {
     fn stream_changes(
         &self,
         db_path: Option<&Path>,
-    ) -> impl Stream<Item = Result<Self::Change, ResyError>> + Send;
+    ) -> Pin<Box<dyn Stream<Item = Result<Self::Change, ResyError>> + Send>>;
 }

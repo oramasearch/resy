@@ -41,8 +41,7 @@ pub enum Change {
     Deleted(S3Object),
 }
 
-pub type ChangeStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<Change, crate::ResyError>> + Send + 'a>>;
+pub type ChangeStream = Pin<Box<dyn Stream<Item = Result<Change, crate::ResyError>> + Send>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum S3BuilderError {
@@ -234,7 +233,7 @@ impl S3 {
     }
 
     /// Stream changes using the configured or auto-generated database path
-    pub fn stream_changes(&self, db_path: Option<&Path>) -> ChangeStream<'_> {
+    pub fn stream_changes(&self, db_path: Option<&Path>) -> ChangeStream {
         let actual_db_path = db_path.map(|p| p.to_path_buf()).unwrap_or_else(|| {
             let bucket_name = self.bucket.replace(['/', '\\', ':'], "_");
             std::path::PathBuf::from(format!("{}.db", bucket_name))
@@ -242,7 +241,7 @@ impl S3 {
         self.stream_diff_and_update(&actual_db_path)
     }
 
-    pub fn stream_diff_and_update(&self, db_path: &Path) -> ChangeStream<'_> {
+    pub fn stream_diff_and_update(&self, db_path: &Path) -> ChangeStream {
         let db_path = db_path.to_path_buf();
         let bucket = self.bucket.clone();
         let client = self.client.clone();
@@ -454,7 +453,6 @@ impl S3 {
         }
     }
 
-    /// Insert or update object state in the database with temp_seen=1
     async fn insert_object_state(
         conn: &mut sqlx::SqliteConnection,
         obj: &S3Object,
@@ -472,7 +470,6 @@ impl S3 {
         Ok(())
     }
 
-    /// Mark an object as seen in the current scan
     async fn mark_object_seen(
         conn: &mut sqlx::SqliteConnection,
         key: &str,
@@ -485,14 +482,10 @@ impl S3 {
     }
 }
 
-// Implement DataSource trait for S3
 impl crate::DataSource for S3 {
     type Change = Change;
 
-    fn stream_changes(
-        &self,
-        db_path: Option<&Path>,
-    ) -> impl Stream<Item = Result<Self::Change, crate::ResyError>> + Send {
+    fn stream_changes(&self, db_path: Option<&Path>) -> ChangeStream {
         S3::stream_changes(self, db_path)
     }
 }
