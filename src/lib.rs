@@ -32,8 +32,10 @@
 //! }
 //! ```
 
+pub mod error;
 pub mod s3;
 
+pub use error::ResyError;
 pub use s3::{Change, S3Object};
 
 use futures_core::Stream;
@@ -52,5 +54,5 @@ pub trait DataSource {
     fn stream_changes(
         &self,
         db_path: Option<&Path>,
-    ) -> impl Stream<Item = Result<Self::Change, Box<dyn std::error::Error + Send + Sync>>> + Send;
+    ) -> impl Stream<Item = Result<Self::Change, ResyError>> + Send;
 }

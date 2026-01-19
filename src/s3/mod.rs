@@ -41,17 +41,13 @@ pub enum Change {
     Deleted(S3Object),
 }
 
-pub type ChangeStream<'a> = Pin<
-    Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
->;
+pub type ChangeStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<Change, crate::ResyError>> + Send + 'a>>;
 
-/// Error type for S3Builder
 #[derive(Debug, thiserror::Error)]
 pub enum S3BuilderError {
     #[error("Missing required field: {0}")]
     MissingField(&'static str),
-    #[error("Database error: {0}")]
-    SqlxError(#[from] sqlx::Error),
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -496,8 +492,7 @@ impl crate::DataSource for S3 {
     fn stream_changes(
         &self,
         db_path: Option<&Path>,
-    ) -> impl Stream<Item = Result<Self::Change, Box<dyn std::error::Error + Send + Sync>>> + Send
-    {
+    ) -> impl Stream<Item = Result<Self::Change, crate::ResyError>> + Send {
         S3::stream_changes(self, db_path)
     }
 }
