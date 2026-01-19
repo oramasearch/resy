@@ -5,9 +5,9 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::SharedCredentialsProvider;
 use chrono::{DateTime, Utc};
 use futures_core::Stream;
-use rusqlite::{Connection, OptionalExtension, Result, params};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::pin::Pin;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -34,8 +34,9 @@ pub enum Change {
     Deleted(S3Object),
 }
 
-pub type ChangeStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + 'a>>;
+pub type ChangeStream<'a> = Pin<
+    Box<dyn Stream<Item = Result<Change, Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>,
+>;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct S3Conf {
@@ -134,33 +135,35 @@ impl S3 {
         }
     }
 
-    pub fn create_state_db(db_path: &Path) -> Result<Connection, rusqlite::Error> {
-        let conn = Connection::open(db_path)?;
+    pub async fn create_state_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
+        let db_url = format!("sqlite:{}", db_path.display());
+        let pool = SqlitePool::connect(&db_url).await?;
 
-        conn.execute(
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS object_state (
             key TEXT PRIMARY KEY,
             etag TEXT NOT NULL,
             size INTEGER NOT NULL,
             last_modified INTEGER NOT NULL
         )",
-            [],
-        )?;
+        )
+        .execute(&pool)
+        .await?;
 
-        conn.execute(
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )",
-            [],
-        )?;
+        )
+        .execute(&pool)
+        .await?;
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_etag ON object_state(etag)",
-            [],
-        )?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_etag ON object_state(etag)")
+            .execute(&pool)
+            .await?;
 
-        Ok(conn)
+        Ok(pool)
     }
 
     pub fn stream_diff_and_update(&self, db_path: &Path) -> ChangeStream<'_> {
@@ -169,15 +172,16 @@ impl S3 {
         let client = self.client.clone();
 
         Box::pin(stream! {
-            let mut conn = match Self::create_state_db(&db_path) {
-                Ok(c) => c,
+            let pool = match Self::create_state_db(&db_path).await {
+                Ok(p) => p,
                 Err(e) => {
                     yield Err(e.into());
                     return;
                 }
             };
 
-            let tx = match conn.transaction() {
+            // Start transaction
+            let mut tx = match pool.begin().await {
                 Ok(t) => t,
                 Err(e) => {
                     yield Err(e.into());
@@ -185,44 +189,19 @@ impl S3 {
                 }
             };
 
-            tx.execute("ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0", []).ok();
+            sqlx::query("ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0")
+                .execute(&mut *tx)
+                .await
+                .ok();
 
             // required to support SQLite versions < 3.35.0 that do not support DROP COLUMN
-            if let Err(e) = tx.execute("UPDATE object_state SET temp_seen = 0", []) {
+            if let Err(e) = sqlx::query("UPDATE object_state SET temp_seen = 0")
+                .execute(&mut *tx)
+                .await
+            {
                 yield Err(e.into());
                 return;
             }
-
-            let mut stmt_select = match tx.prepare(
-                "SELECT etag, size, last_modified FROM object_state WHERE key = ?1"
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    yield Err(e.into());
-                    return;
-                }
-            };
-
-            let mut stmt_upsert = match tx.prepare(
-                "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
-                 VALUES (?1, ?2, ?3, ?4, 1)"
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    yield Err(e.into());
-                    return;
-                }
-            };
-
-            let mut stmt_mark_seen = match tx.prepare(
-                "UPDATE object_state SET temp_seen = 1 WHERE key = ?1"
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    yield Err(e.into());
-                    return;
-                }
-            };
 
             let mut continuation_token: Option<String> = None;
             loop {
@@ -242,14 +221,19 @@ impl S3 {
                 for obj in response.contents() {
                     let Some(current_obj) = Self::parse_aws_object(obj) else { continue };
 
-                    let previous_state = match stmt_select.query_row([&current_obj.key], |row| {
-                        Ok(CompactS3Object {
-                            etag: row.get(0)?,
-                            size: row.get(1)?,
-                            last_modified: row.get(2)?,
-                        })
-                    }).optional() {
-                        Ok(ps) => ps,
+                    let previous_state = match sqlx::query(
+                        "SELECT etag, size, last_modified FROM object_state WHERE key = ?1"
+                    )
+                    .bind(&current_obj.key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    {
+                        Ok(Some(row)) => Some(CompactS3Object {
+                            etag: row.get(0),
+                            size: row.get(1),
+                            last_modified: row.get(2),
+                        }),
+                        Ok(None) => None,
                         Err(e) => {
                             yield Err(e.into());
                             return;
@@ -259,33 +243,44 @@ impl S3 {
                     let change = Self::determine_change(&current_obj, previous_state.clone());
 
                     if previous_state.is_none() {
-                        if let Err(e) = stmt_upsert.execute(params![
-                            current_obj.key,
-                            current_obj.etag,
-                            current_obj.size,
-                            current_obj.last_modified.timestamp()
-                        ]) {
+                        if let Err(e) = sqlx::query(
+                            "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
+                             VALUES (?1, ?2, ?3, ?4, 1)"
+                        )
+                        .bind(&current_obj.key)
+                        .bind(&current_obj.etag)
+                        .bind(current_obj.size)
+                        .bind(current_obj.last_modified.timestamp())
+                        .execute(&mut *tx)
+                        .await
+                        {
                             yield Err(e.into());
                             return;
                         }
                     } else {
-                        if let Err(e) = stmt_mark_seen.execute([&current_obj.key]) {
+                        if let Err(e) = sqlx::query("UPDATE object_state SET temp_seen = 1 WHERE key = ?1")
+                            .bind(&current_obj.key)
+                            .execute(&mut *tx)
+                            .await
+                        {
                             yield Err(e.into());
                             return;
                         }
 
                         if change.is_some() {
-                            match stmt_upsert.execute(params![
-                                current_obj.key,
-                                current_obj.etag,
-                                current_obj.size,
-                                current_obj.last_modified.timestamp()
-                            ]) {
-                                Ok(_) => {},
-                                Err(e) => {
-                                    yield Err(e.into());
-                                    return;
-                                }
+                            if let Err(e) = sqlx::query(
+                                "INSERT OR REPLACE INTO object_state (key, etag, size, last_modified, temp_seen) \
+                                 VALUES (?1, ?2, ?3, ?4, 1)"
+                            )
+                            .bind(&current_obj.key)
+                            .bind(&current_obj.etag)
+                            .bind(current_obj.size)
+                            .bind(current_obj.last_modified.timestamp())
+                            .execute(&mut *tx)
+                            .await
+                            {
+                                yield Err(e.into());
+                                return;
                             }
                         }
                     }
@@ -302,40 +297,22 @@ impl S3 {
                 }
             }
 
-            drop(stmt_select);
-            drop(stmt_upsert);
-            drop(stmt_mark_seen);
-
-            let deleted_rows: Vec<(String, CompactS3Object)> = {
-                let mut stmt = match tx.prepare(
-                    "SELECT key, etag, size, last_modified FROM object_state WHERE temp_seen = 0"
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        yield Err(e.into());
-                        return;
-                    }
-                };
-                match stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
+            let deleted_rows: Vec<(String, CompactS3Object)> = match sqlx::query(
+                "SELECT key, etag, size, last_modified FROM object_state WHERE temp_seen = 0"
+            )
+            .fetch_all(&mut *tx)
+            .await
+            {
+                Ok(rows) => rows.into_iter().map(|row| {
+                    (
+                        row.get::<String, _>(0),
                         CompactS3Object {
-                            etag: row.get(1)?,
-                            size: row.get(2)?,
-                            last_modified: row.get(3)?,
+                            etag: row.get(1),
+                            size: row.get(2),
+                            last_modified: row.get(3),
                         },
-                    ))
-                }).and_then(|mapped| mapped.collect::<Result<Vec<_>, _>>()) {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        yield Err(e.into());
-                        return;
-                    }
-                }
-            };
-
-            let mut stmt_delete = match tx.prepare("DELETE FROM object_state WHERE key = ?1") {
-                Ok(s) => s,
+                    )
+                }).collect(),
                 Err(e) => {
                     yield Err(e.into());
                     return;
@@ -345,35 +322,36 @@ impl S3 {
             for (key, prev_obj) in deleted_rows {
                 yield Ok(Change::Deleted(Self::compact_to_s3_object(&key, &prev_obj)));
 
-                if let Err(e) = stmt_delete.execute([&key]) {
+                if let Err(e) = sqlx::query("DELETE FROM object_state WHERE key = ?1")
+                    .bind(&key)
+                    .execute(&mut *tx)
+                    .await
+                {
                     yield Err(e.into());
                     return;
                 }
             }
 
-            drop(stmt_delete);
-
             // Clean up the temporary column (for next run)
             // SQLite doesn't support DROP COLUMN before version 3.35.0
             // so let's make sure we use version >= 3.35.0 in production
-            tx.execute(
-                "ALTER TABLE object_state DROP COLUMN IF EXISTS temp_seen",
-                [],
-            )
-            .or_else(|_| {
-                println!("Warning: Could not drop temp_seen column (older SQLite version)");
-                Ok::<_, rusqlite::Error>(0) // is it ok to return a success here, since it is
-                    // covered above.
-            })?;
+            sqlx::query("ALTER TABLE object_state DROP COLUMN IF EXISTS temp_seen")
+                .execute(&mut *tx)
+                .await
+                .ok();
 
-            if let Err(e) = tx.prepare(
+            if let Err(e) = sqlx::query(
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_updated', ?1)"
-            ).and_then(|mut s| s.execute(params![Utc::now().timestamp()])) {
+            )
+            .bind(Utc::now().timestamp())
+            .execute(&mut *tx)
+            .await
+            {
                 yield Err(e.into());
                 return;
             }
 
-            if let Err(e) = tx.commit() {
+            if let Err(e) = tx.commit().await {
                 yield Err(e.into());
                 return;
             }
@@ -501,25 +479,26 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db_path = temp_file.path();
 
-        let conn = S3::create_state_db(db_path).unwrap();
+        let pool = S3::create_state_db(db_path).await.unwrap();
 
-        let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-            .unwrap();
-        let tables: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+        let tables: Vec<String> = sqlx::query("SELECT name FROM sqlite_master WHERE type='table'")
+            .fetch_all(&pool)
+            .await
             .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
 
         assert!(tables.contains(&"object_state".to_string()));
         assert!(tables.contains(&"metadata".to_string()));
 
-        let mut index_stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_etag'")
-            .unwrap();
-        let index_count: i32 = index_stmt.query_row([], |_| Ok(1)).unwrap_or(0);
-        assert_eq!(index_count, 1);
+        let index_exists =
+            sqlx::query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_etag'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .is_some();
+        assert!(index_exists);
     }
 
     #[test]
@@ -546,22 +525,30 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db_path = temp_file.path();
 
-        let conn = S3::create_state_db(db_path).unwrap();
+        let pool = S3::create_state_db(db_path).await.unwrap();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO object_state (key, etag, size, last_modified) VALUES (?1, ?2, ?3, ?4)",
-            params!["test/file.txt", "etag123", 1024, 1609459200],
         )
+        .bind("test/file.txt")
+        .bind("etag123")
+        .bind(1024_i64)
+        .bind(1609459200_i64)
+        .execute(&pool)
+        .await
         .unwrap();
 
-        let mut stmt = conn
-            .prepare("SELECT key, etag, size, last_modified FROM object_state WHERE key = ?1")
-            .unwrap();
-        let (key, etag, size, last_modified): (String, String, i64, i64) = stmt
-            .query_row(["test/file.txt"], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .unwrap();
+        let row =
+            sqlx::query("SELECT key, etag, size, last_modified FROM object_state WHERE key = ?1")
+                .bind("test/file.txt")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let key: String = row.get(0);
+        let etag: String = row.get(1);
+        let size: i64 = row.get(2);
+        let last_modified: i64 = row.get(3);
 
         assert_eq!(key, "test/file.txt");
         assert_eq!(etag, "etag123");
@@ -574,39 +561,42 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db_path = temp_file.path();
 
-        let conn = S3::create_state_db(db_path).unwrap();
+        let pool = S3::create_state_db(db_path).await.unwrap();
 
-        conn.execute(
+        sqlx::query(
             "INSERT INTO object_state (key, etag, size, last_modified) VALUES (?1, ?2, ?3, ?4)",
-            params!["test/file.txt", "etag123", 1024, 1609459200],
         )
+        .bind("test/file.txt")
+        .bind("etag123")
+        .bind(1024_i64)
+        .bind(1609459200_i64)
+        .execute(&pool)
+        .await
         .unwrap();
 
-        let tx = conn.unchecked_transaction().unwrap();
+        let mut tx = pool.begin().await.unwrap();
 
-        tx.execute(
-            "ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0",
-            [],
-        )
-        .unwrap();
-
-        tx.execute(
-            "UPDATE object_state SET temp_seen = 1 WHERE key = ?1",
-            ["test/file.txt"],
-        )
-        .unwrap();
-
-        let temp_seen: i32 = tx
-            .query_row(
-                "SELECT temp_seen FROM object_state WHERE key = ?1",
-                ["test/file.txt"],
-                |row| row.get(0),
-            )
+        sqlx::query("ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0")
+            .execute(&mut *tx)
+            .await
             .unwrap();
 
+        sqlx::query("UPDATE object_state SET temp_seen = 1 WHERE key = ?1")
+            .bind("test/file.txt")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let row = sqlx::query("SELECT temp_seen FROM object_state WHERE key = ?1")
+            .bind("test/file.txt")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+
+        let temp_seen: i32 = row.get(0);
         assert_eq!(temp_seen, 1);
 
-        tx.commit().unwrap();
+        tx.commit().await.unwrap();
     }
 
     #[test]

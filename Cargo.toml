@@ -10,7 +10,7 @@ aws-credential-types = "1.2.6"
 aws-sdk-s3 = "1.106.0"
 chrono = { version = "0.4.42", features = ["serde"] }
 futures-core = "0.3"
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.223", features = ["derive"] }
 tokio = { version = "1.47.1", features = ["full"] }
