@@ -5,7 +5,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```
+//! ```no_run
 //! use resy::s3::S3;
 //! use resy::Change;
 //! use tokio_stream::StreamExt;
@@ -19,7 +19,7 @@
 //!         .build()
 //!         .await?;
 //!
-//!     let mut stream = s3.stream_changes(None);
+//!     let mut stream = s3.stream_changes(None).await.unwrap();
 //!     while let Some(result) = stream.next().await {
 //!         match result {
 //!             Ok(Change::Added(obj)) => println!("Added: {}", obj.key),
@@ -38,10 +38,11 @@ pub mod s3;
 pub use error::ResyError;
 pub use s3::{Change, S3Object};
 
-use futures_core::Stream;
+use std::future::Future;
 use std::path::Path;
+use tokio_stream::wrappers::ReceiverStream;
 
-use std::pin::Pin;
+pub type ChangeStream<T> = ReceiverStream<Result<T, ResyError>>;
 
 /// Trait for data sources that can stream changes
 ///
@@ -56,5 +57,5 @@ pub trait DataSource {
     fn stream_changes(
         &self,
         db_path: Option<&Path>,
-    ) -> Pin<Box<dyn Stream<Item = Result<Self::Change, ResyError>> + Send>>;
+    ) -> impl Future<Output = Result<ChangeStream<Self::Change>, ResyError>> + Send;
 }

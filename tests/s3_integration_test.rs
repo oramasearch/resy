@@ -66,7 +66,7 @@ async fn test_stream_diff_and_update() {
     let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), None);
 
     // 1. Initial check: No changes
-    let mut stream = s3.stream_diff_and_update(db_path);
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -87,7 +87,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path);
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -115,7 +115,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path);
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -140,7 +140,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path);
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -174,7 +174,7 @@ async fn test_stream_stops_at_first_error() {
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 
-    let mut stream = s3.stream_diff_and_update(db_path);
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
     let mut error_occurred = false;
 
     while let Some(result) = stream.next().await {
