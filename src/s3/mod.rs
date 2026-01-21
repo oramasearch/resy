@@ -44,6 +44,8 @@ pub enum Change {
 pub enum S3BuilderError {
     #[error("Missing required field: {0}")]
     MissingField(&'static str),
+    #[error("Invalid batch size: {0}. Must be at least 1")]
+    InvalidBatchSize(i32),
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -123,6 +125,11 @@ impl S3Builder {
             .take()
             .ok_or(S3BuilderError::MissingField("credentials"))?;
 
+        let batch_size = self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+        if batch_size <= 0 {
+            return Err(S3BuilderError::InvalidBatchSize(batch_size));
+        }
+
         let credentials = Credentials::new(
             credentials.access_key_id.expose_secret(),
             credentials.secret_access_key.expose_secret(),
@@ -147,7 +154,7 @@ impl S3Builder {
         Ok(S3 {
             client: s3_client,
             bucket,
-            batch_size: self.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+            batch_size,
         })
     }
 }
@@ -661,6 +668,36 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, S3BuilderError::MissingField("credentials")));
+    }
+
+    #[tokio::test]
+    async fn test_builder_invalid_batch_size_negative() {
+        let result = S3::builder()
+            .bucket("test-bucket")
+            .region("us-west-2")
+            .credentials("test-key", "test-secret")
+            .batch_size(-1)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, S3BuilderError::InvalidBatchSize(-1)));
+    }
+
+    #[tokio::test]
+    async fn test_builder_invalid_batch_size_zero() {
+        let result = S3::builder()
+            .bucket("test-bucket")
+            .region("us-west-2")
+            .credentials("test-key", "test-secret")
+            .batch_size(0)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, S3BuilderError::InvalidBatchSize(0)));
     }
 
     fn create_test_s3_object(key: &str, etag: &str, size: i64, timestamp: i64) -> S3Object {
