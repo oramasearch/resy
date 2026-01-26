@@ -1,36 +1,4 @@
-//! # Resy - Remote Sync Change Detection Library
-//!
-//! Resy monitors remote data sources (currently S3) and streams detected changes
-//! to consuming applications.
-//!
-//! ## Quick Start
-//!
-//! ```no_run
-//! use resy::s3::S3;
-//! use resy::Change;
-//! use tokio_stream::StreamExt;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let s3 = S3::builder()
-//!         .bucket("my-bucket")
-//!         .region("us-east-1")
-//!         .credentials("key", "secret")
-//!         .build()
-//!         .await?;
-//!
-//!     let mut stream = s3.stream_changes(None).await.unwrap();
-//!     while let Some(result) = stream.next().await {
-//!         match result {
-//!             Ok(Change::Added(obj)) => println!("Added: {}", obj.key),
-//!             Ok(Change::Modified { new, .. }) => println!("Modified: {}", new.key),
-//!             Ok(Change::Deleted(obj)) => println!("Deleted: {}", obj.key),
-//!             Err(e) => eprintln!("Error: {}", e),
-//!         }
-//!     }
-//!     Ok(())
-//! }
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod error;
 pub mod s3;

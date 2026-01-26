@@ -6,7 +6,7 @@
 
 ### Basic Example
 
-```rust
+```rust,no_run
 use resy::s3::S3;
 use resy::Change;
 use tokio_stream::StreamExt;
@@ -18,12 +18,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bucket("my-bucket")
         .region("us-east-1")
         .credentials("AKIA...", "secret...")
+        .endpoint("http://localhost:4566") // Optional: for LocalStack/MinIO
+        .batch_size(500)                   // Optional: S3 pagination size (default: 1000)
         .build()
         .await?;
 
     // Stream changes - database path is auto-generated as "{bucket}.db"
     // Or specify custom path: s3.stream_changes(Some(Path::new("custom.db")))
-    let mut stream = s3.stream_changes(None);
+    let mut stream = s3.stream_changes(None).await.unwrap();
 
     while let Some(result) = stream.next().await {
         match result {
@@ -48,22 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-```
-
-### Builder Options
-
-The S3 builder supports several configuration options:
-
-```rust
-let s3 = S3::builder()
-    .bucket("my-bucket")              // Required
-    .region("us-west-2")              // Required
-    .credentials(key, secret)         // Required
-    .endpoint("http://localhost:4566") // Optional: for LocalStack/MinIO
-    .batch_size(500)                   // Optional: S3 pagination size (default: 1000)
-    .db_path("custom.db")             // Optional: custom state DB path
-    .build()
-    .await?;
 ```
 
 ## Security
