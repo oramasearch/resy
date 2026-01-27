@@ -295,7 +295,7 @@ impl S3 {
             }
 
             // Handle deleted objects, objects present in the local database but not seen
-            if let Err(e) = Self::handle_deleted_objects(&mut conn, &sender).await {
+            if let Err(e) = Self::handle_deleted_objects(&mut conn, &sender, batch_size).await {
                 send_err(e).await;
                 return;
             }
@@ -387,7 +387,6 @@ impl S3 {
             .await
             .ok();
 
-        // Reset all to unseen (required for SQLite < 3.35.0 that doesn't support DROP COLUMN)
         sqlx::query("UPDATE object_state SET temp_seen = 0")
             .execute(conn)
             .await?;
@@ -548,17 +547,25 @@ impl S3 {
     async fn handle_deleted_objects(
         conn: &mut SqliteConnection,
         tx: &tokio::sync::mpsc::Sender<Result<Change, crate::ResyError>>,
+        batch_size: i32,
     ) -> Result<(), crate::ResyError> {
         let deleted_rows = Self::fetch_deleted_objects(conn).await?;
 
-        for (key, prev_obj) in deleted_rows {
-            let change = Change::Deleted(Self::compact_to_s3_object(&key, &prev_obj));
+        for chunk in deleted_rows.chunks(batch_size as usize) {
+            let mut db_tx = conn.begin().await?;
 
-            if tx.send(Ok(change)).await.is_err() {
-                return Ok(());
+            for (key, prev_obj) in chunk {
+                let change = Change::Deleted(Self::compact_to_s3_object(key, prev_obj));
+
+                if tx.send(Ok(change)).await.is_err() {
+                    db_tx.commit().await?;
+                    return Ok(());
+                }
+
+                Self::delete_object_state(&mut db_tx, key).await?;
             }
 
-            Self::delete_object_state(conn, &key).await?;
+            db_tx.commit().await?;
         }
 
         Ok(())
