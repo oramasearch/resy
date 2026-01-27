@@ -5,13 +5,11 @@ use aws_sdk_s3::{
     Client,
     config::{self, BehaviorVersion, Region},
 };
-use resy::{Change, s3::S3};
-use testcontainers::{GenericImage, core::WaitFor, runners::AsyncRunner};
+use testcontainers::{ContainerAsync, GenericImage, core::WaitFor, runners::AsyncRunner};
 use testcontainers::{ImageExt, core::ContainerPort};
 use tokio_stream::StreamExt;
 
-#[tokio::test]
-async fn test_stream_diff_and_update() {
+async fn setup_localstack_s3() -> (ContainerAsync<GenericImage>, Client) {
     let localstack_port = 4566;
     let container = GenericImage::new("localstack/localstack", "s3-latest")
         .with_exposed_port(ContainerPort::Tcp(localstack_port))
@@ -40,7 +38,14 @@ async fn test_stream_diff_and_update() {
         .force_path_style(true)
         .build();
 
-    let s3_client = Client::from_conf(s3_config);
+    let client = Client::from_conf(s3_config);
+
+    (container, client)
+}
+
+#[tokio::test]
+async fn test_stream_diff_and_update() {
+    let (_container, s3_client) = setup_localstack_s3().await;
 
     let bucket_name = "my-test-bucket";
 
@@ -200,35 +205,7 @@ async fn test_stream_stops_at_first_error() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_db_access() {
-    let localstack_port = 4566;
-    let container = GenericImage::new("localstack/localstack", "s3-latest")
-        .with_exposed_port(ContainerPort::Tcp(localstack_port))
-        .with_wait_for(WaitFor::message_on_stdout("Ready."))
-        .with_env_var("SERVICES", "s3")
-        .start()
-        .await
-        .unwrap();
-
-    let host = container.get_host().await.unwrap();
-    let host_port = container
-        .get_host_port_ipv4(ContainerPort::Tcp(localstack_port))
-        .await
-        .unwrap();
-    let endpoint_url = format!("http://{}:{}", host, host_port);
-
-    let credentials = Credentials::new("test", "test", None, None, "test");
-    let config = SdkConfig::builder()
-        .credentials_provider(SharedCredentialsProvider::new(credentials))
-        .endpoint_url(endpoint_url)
-        .region(Region::new("us-east-1"))
-        .behavior_version(BehaviorVersion::latest())
-        .build();
-
-    let s3_config = config::Builder::from(&config)
-        .force_path_style(true)
-        .build();
-
-    let s3_client = Client::from_conf(s3_config);
+    let (_container, s3_client) = setup_localstack_s3().await;
 
     let bucket_name = "my-test-bucket";
 
@@ -268,4 +245,86 @@ async fn test_concurrent_db_access() {
     );
 
     drop(stream1);
+}
+
+#[tokio::test]
+async fn test_per_batch_commit_crash_recovery() {
+    let (_container, s3_client) = setup_localstack_s3().await;
+
+    let bucket_name = "batch-test-bucket";
+
+    s3_client
+        .create_bucket()
+        .bucket(bucket_name)
+        .send()
+        .await
+        .expect("Failed to create S3 bucket");
+
+    for i in 0..25 {
+        s3_client
+            .put_object()
+            .bucket(bucket_name)
+            .key(format!("file-{:03}.txt", i))
+            .body(aws_sdk_s3::primitives::ByteStream::from(
+                format!("content-{}", i).as_bytes().to_vec(),
+            ))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let db_file = tempfile::NamedTempFile::new().unwrap();
+    let db_path = db_file.path();
+
+    let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), Some(8));
+
+    // First sync: Simulate a "crash" by only consuming first 10 changes
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut first_sync_changes = Vec::new();
+    for _ in 0..10 {
+        if let Some(result) = stream.next().await {
+            first_sync_changes.push(result.unwrap());
+        }
+    }
+    // Drop the stream to simulate crash (remaining changes won't be consumed)
+    drop(stream);
+
+    assert_eq!(
+        first_sync_changes.len(),
+        10,
+        "Should have processed 10 changes before 'crash'"
+    );
+
+    // Verify all 10 changes are Added
+    for change in &first_sync_changes {
+        match change {
+            resy::Change::Added(_) => {}
+            _ => panic!("Expected all changes to be Added in first sync"),
+        }
+    }
+
+    // Second sync: Restart after "crash"
+    // we should get 15 (remaining objects) + 2 (previous run - batch size)
+    // we prefer to reprocess objects instead of silently ignoring them.
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut second_sync_changes = Vec::new();
+    while let Some(result) = stream.next().await {
+        second_sync_changes.push(result.unwrap());
+    }
+    assert_eq!(second_sync_changes.len(), 17);
+
+    for change in &second_sync_changes {
+        match change {
+            resy::Change::Added(_) => {}
+            _ => panic!("Expected all changes to be Added in second sync"),
+        }
+    }
+
+    // Third sync: Should report no changes since everything is synced
+    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut third_sync_changes = Vec::new();
+    while let Some(result) = stream.next().await {
+        third_sync_changes.push(result.unwrap());
+    }
+    assert_eq!(third_sync_changes.len(), 0,);
 }

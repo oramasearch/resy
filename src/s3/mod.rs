@@ -206,6 +206,8 @@ impl S3 {
         }
     }
 
+    // Crate the sqlite db, it is acquired with Exclusive lock, so only one process can use
+    // the db at time. A transaction is not needed.
     pub async fn create_state_db(db_path: &Path) -> Result<SqliteConnection, sqlx::Error> {
         let options = SqliteConnectOptions::new()
             .filename(db_path)
@@ -260,7 +262,7 @@ impl S3 {
         let client = self.client.clone();
         let batch_size = self.batch_size;
 
-        let mut pool = Self::create_state_db(&db_path).await.map_err(|e| {
+        let mut conn = Self::create_state_db(&db_path).await.map_err(|e| {
             format!(
                 "Failed to create state database at {}: {}",
                 db_path.display(),
@@ -279,45 +281,31 @@ impl S3 {
                 let _ = sender.send(Err(e)).await;
             };
 
-            let mut db_tx = match pool.begin_with("BEGIN IMMEDIATE TRANSACTION;").await {
-                Ok(t) => t,
-                Err(e) => {
-                    send_err(e.into()).await;
-                    return;
-                }
-            };
-
-            if let Err(e) = Self::setup_temp_tracking_column(&mut db_tx).await {
+            if let Err(e) = Self::setup_temp_tracking_column(&mut conn).await {
                 send_err(e.into()).await;
                 return;
             }
 
             // Handle created and modified objects by syncing from S3 to local database
             if let Err(e) =
-                Self::sync_s3_objects(&client, &bucket, batch_size, &mut db_tx, &sender).await
+                Self::sync_s3_objects(&client, &bucket, batch_size, &mut conn, &sender).await
             {
                 send_err(e).await;
                 return;
             }
 
             // Handle deleted objects, objects present in the local database but not seen
-            // during the current S3 bucket scan.
-            if let Err(e) = Self::handle_deleted_objects(&mut db_tx, &sender).await {
+            if let Err(e) = Self::handle_deleted_objects(&mut conn, &sender).await {
                 send_err(e).await;
                 return;
             }
 
-            if let Err(e) = Self::cleanup_temp_column(&mut db_tx).await {
+            if let Err(e) = Self::cleanup_temp_column(&mut conn).await {
                 send_err(e.into()).await;
                 return;
             }
 
-            if let Err(e) = Self::update_last_sync_metadata(&mut db_tx).await {
-                send_err(e.into()).await;
-                return;
-            }
-
-            if let Err(e) = db_tx.commit().await {
+            if let Err(e) = Self::update_last_sync_metadata(&mut conn).await {
                 send_err(e.into()).await;
             }
         });
@@ -393,28 +381,24 @@ impl S3 {
     }
 
     /// Setup the temporary tracking column for detecting deletions
-    async fn setup_temp_tracking_column(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ) -> Result<(), sqlx::Error> {
+    async fn setup_temp_tracking_column(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
         sqlx::query("ALTER TABLE object_state ADD COLUMN temp_seen INTEGER DEFAULT 0")
-            .execute(&mut **db_tx)
+            .execute(&mut *conn)
             .await
             .ok();
 
         // Reset all to unseen (required for SQLite < 3.35.0 that doesn't support DROP COLUMN)
         sqlx::query("UPDATE object_state SET temp_seen = 0")
-            .execute(&mut **db_tx)
+            .execute(conn)
             .await?;
 
         Ok(())
     }
 
-    async fn cleanup_temp_column(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ) -> Result<(), sqlx::Error> {
+    async fn cleanup_temp_column(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
         // SQLite doesn't support DROP COLUMN before version 3.35.0
         sqlx::query("ALTER TABLE object_state DROP COLUMN IF EXISTS temp_seen")
-            .execute(&mut **db_tx)
+            .execute(conn)
             .await
             .ok();
         Ok(())
@@ -422,12 +406,12 @@ impl S3 {
 
     /// Fetch previous state for an object from the database
     async fn fetch_previous_state(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
         key: &str,
     ) -> Result<Option<CompactS3Object>, sqlx::Error> {
         match sqlx::query("SELECT etag, size, last_modified FROM object_state WHERE key = ?1")
             .bind(key)
-            .fetch_optional(&mut **db_tx)
+            .fetch_optional(conn)
             .await?
         {
             Some(row) => Ok(Some(CompactS3Object {
@@ -441,24 +425,24 @@ impl S3 {
 
     /// Process a single S3 object: determine change, update database state
     async fn process_s3_object(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
         current_obj: &S3Object,
     ) -> Result<Option<Change>, sqlx::Error> {
-        let previous_state = Self::fetch_previous_state(db_tx, &current_obj.key).await?;
+        let previous_state = Self::fetch_previous_state(conn, &current_obj.key).await?;
         let change = Self::determine_change(current_obj, previous_state.clone());
 
         match previous_state {
             None => {
                 // New object: insert into DB and mark as seen
-                Self::insert_object_state(db_tx, current_obj).await?;
+                Self::insert_object_state(conn, current_obj).await?;
             }
             Some(_) => {
                 // Existing object: mark as seen
-                Self::mark_object_seen(db_tx, &current_obj.key).await?;
+                Self::mark_object_seen(conn, &current_obj.key).await?;
 
                 // If modified, update the state
                 if change.is_some() {
-                    Self::insert_object_state(db_tx, current_obj).await?;
+                    Self::insert_object_state(conn, current_obj).await?;
                 }
             }
         }
@@ -468,12 +452,12 @@ impl S3 {
 
     /// Fetch all objects that were not seen during sync (deleted from S3)
     async fn fetch_deleted_objects(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
     ) -> Result<Vec<(String, CompactS3Object)>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT key, etag, size, last_modified FROM object_state WHERE temp_seen = 0",
         )
-        .fetch_all(&mut **db_tx)
+        .fetch_all(conn)
         .await?;
 
         Ok(rows
@@ -493,40 +477,43 @@ impl S3 {
 
     /// Delete an object from the database
     async fn delete_object_state(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
         key: &str,
     ) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM object_state WHERE key = ?1")
             .bind(key)
-            .execute(&mut **db_tx)
+            .execute(conn)
             .await?;
         Ok(())
     }
 
-    async fn update_last_sync_metadata(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    ) -> Result<(), sqlx::Error> {
+    async fn update_last_sync_metadata(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
         sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_updated', ?1)")
             .bind(Utc::now().timestamp())
-            .execute(&mut **db_tx)
+            .execute(conn)
             .await?;
         Ok(())
     }
 
     /// Sync all objects from S3 to the database, yielding changes to the channel
+    /// Commits after each batch for crash recovery. If the process crashes, it will
+    /// restart from the beginning, but already-processed items will be skipped as
+    /// their etag matches (no change detected).
     async fn sync_s3_objects(
         client: &Client,
         bucket: &str,
         batch_size: i32,
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
         sender: &tokio::sync::mpsc::Sender<Result<Change, crate::ResyError>>,
     ) -> Result<(), crate::ResyError> {
         let mut continuation_token: Option<String> = None;
 
         loop {
+            let mut db_tx = conn.begin().await?;
+
             let mut request = client.list_objects_v2().bucket(bucket).max_keys(batch_size);
 
-            if let Some(token) = continuation_token.take() {
+            if let Some(token) = &continuation_token {
                 request = request.continuation_token(token);
             }
 
@@ -537,7 +524,7 @@ impl S3 {
                     continue;
                 };
 
-                let change = Self::process_s3_object(db_tx, &current_obj).await?;
+                let change = Self::process_s3_object(&mut db_tx, &current_obj).await?;
 
                 if let Some(change) = change
                     && sender.send(Ok(change)).await.is_err()
@@ -545,6 +532,8 @@ impl S3 {
                     return Ok(());
                 }
             }
+
+            db_tx.commit().await?;
 
             if response.is_truncated().unwrap_or(false) {
                 continuation_token = response.next_continuation_token().map(|s| s.to_string());
@@ -557,10 +546,10 @@ impl S3 {
     }
 
     async fn handle_deleted_objects(
-        db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        conn: &mut SqliteConnection,
         tx: &tokio::sync::mpsc::Sender<Result<Change, crate::ResyError>>,
     ) -> Result<(), crate::ResyError> {
-        let deleted_rows = Self::fetch_deleted_objects(db_tx).await?;
+        let deleted_rows = Self::fetch_deleted_objects(conn).await?;
 
         for (key, prev_obj) in deleted_rows {
             let change = Change::Deleted(Self::compact_to_s3_object(&key, &prev_obj));
@@ -569,7 +558,7 @@ impl S3 {
                 return Ok(());
             }
 
-            Self::delete_object_state(db_tx, &key).await?;
+            Self::delete_object_state(conn, &key).await?;
         }
 
         Ok(())
