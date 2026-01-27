@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Stream changes - db_path is auto-generated as "{bucket}.db" if not specified
-    let mut stream = s3.stream_changes(None).await.unwrap();
+    let mut stream = s3.stream_changes("resy.db").await.unwrap();
 
     while let Some(result) = stream.next().await {
         match result {

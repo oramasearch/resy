@@ -5,8 +5,9 @@ use aws_sdk_s3::config::SharedCredentialsProvider;
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
-use std::path::Path;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{ConnectOptions, Connection, Row, SqliteConnection};
+use std::path::{Path, PathBuf};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::ChangeStream;
@@ -173,7 +174,7 @@ impl S3Builder {
 ///     .build()
 ///     .await?;
 ///     
-/// let mut changes = s3.stream_changes(None).await.unwrap();
+/// let mut changes = s3.stream_changes("").await.unwrap();
 /// while let Some(change) = changes.next().await {
 ///     // Handle change
 /// #   break;
@@ -205,46 +206,48 @@ impl S3 {
         }
     }
 
-    pub async fn create_state_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
-        let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
-        let pool = SqlitePool::connect(&db_url).await?;
+    pub async fn create_state_db(db_path: &Path) -> Result<SqliteConnection, sqlx::Error> {
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true)
+            .locking_mode(sqlx::sqlite::SqliteLockingMode::Exclusive)
+            .disable_statement_logging();
+
+        let mut pool = SqliteConnection::connect_with(&options).await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS object_state (
-            key TEXT PRIMARY KEY,
-            etag TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            last_modified INTEGER NOT NULL
-        )",
+                key TEXT PRIMARY KEY,
+                etag TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                last_modified INTEGER NOT NULL
+            )",
         )
-        .execute(&pool)
+        .execute(&mut pool)
         .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )",
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
         )
-        .execute(&pool)
+        .execute(&mut pool)
         .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_etag ON object_state(etag)")
-            .execute(&pool)
+            .execute(&mut pool)
             .await?;
 
         Ok(pool)
     }
 
     /// Stream changes using the configured or auto-generated database path
-    pub async fn stream_changes(
+    pub async fn stream_changes<P: Into<PathBuf>>(
         &self,
-        db_path: Option<&Path>,
+        db_path: P,
     ) -> Result<ChangeStream<Change>, crate::ResyError> {
-        let actual_db_path = db_path.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-            let bucket_name = self.bucket.replace(['/', '\\', ':'], "_");
-            std::path::PathBuf::from(format!("{}.db", bucket_name))
-        });
+        let actual_db_path = db_path.into();
         self.stream_diff_and_update(&actual_db_path).await
     }
 
@@ -257,7 +260,7 @@ impl S3 {
         let client = self.client.clone();
         let batch_size = self.batch_size;
 
-        let pool = Self::create_state_db(&db_path).await.map_err(|e| {
+        let mut pool = Self::create_state_db(&db_path).await.map_err(|e| {
             format!(
                 "Failed to create state database at {}: {}",
                 db_path.display(),
@@ -265,7 +268,10 @@ impl S3 {
             )
         })?;
 
-        let (sender, receiver) = tokio::sync::mpsc::channel(self.batch_size as usize);
+        // Use channel of one item to prevent marking items as seen
+        // before the consumer consumed it.
+        // This ensures we never lose items if the process crashes.
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
 
         tokio::spawn(async move {
             // util to send err
@@ -273,7 +279,7 @@ impl S3 {
                 let _ = sender.send(Err(e)).await;
             };
 
-            let mut db_tx = match pool.begin().await {
+            let mut db_tx = match pool.begin_with("BEGIN IMMEDIATE TRANSACTION;").await {
                 Ok(t) => t,
                 Err(e) => {
                     send_err(e.into()).await;
@@ -513,7 +519,7 @@ impl S3 {
         bucket: &str,
         batch_size: i32,
         db_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        tx: &tokio::sync::mpsc::Sender<Result<Change, crate::ResyError>>,
+        sender: &tokio::sync::mpsc::Sender<Result<Change, crate::ResyError>>,
     ) -> Result<(), crate::ResyError> {
         let mut continuation_token: Option<String> = None;
 
@@ -534,7 +540,7 @@ impl S3 {
                 let change = Self::process_s3_object(db_tx, &current_obj).await?;
 
                 if let Some(change) = change
-                    && tx.send(Ok(change)).await.is_err()
+                    && sender.send(Ok(change)).await.is_err()
                 {
                     return Ok(());
                 }
@@ -575,7 +581,7 @@ impl crate::DataSource for S3 {
 
     async fn stream_changes(
         &self,
-        db_path: Option<&Path>,
+        db_path: PathBuf,
     ) -> Result<ChangeStream<Self::Change>, crate::ResyError> {
         S3::stream_changes(self, db_path).await
     }
@@ -600,7 +606,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db_path = temp_file.path();
 
-        let changes = s3.stream_changes(Some(db_path)).await.unwrap();
+        let changes = s3.stream_changes(db_path).await.unwrap();
         check_send_sync(changes);
     }
 
@@ -609,10 +615,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db_path = temp_file.path();
 
-        let pool = S3::create_state_db(db_path).await.unwrap();
+        let mut pool = S3::create_state_db(db_path).await.unwrap();
 
         let tables: Vec<String> = sqlx::query("SELECT name FROM sqlite_master WHERE type='table'")
-            .fetch_all(&pool)
+            .fetch_all(&mut pool)
             .await
             .unwrap()
             .into_iter()
@@ -624,7 +630,7 @@ mod tests {
 
         let index_exists =
             sqlx::query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_etag'")
-                .fetch_optional(&pool)
+                .fetch_optional(&mut pool)
                 .await
                 .unwrap()
                 .is_some();

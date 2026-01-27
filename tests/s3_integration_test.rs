@@ -5,6 +5,7 @@ use aws_sdk_s3::{
     Client,
     config::{self, BehaviorVersion, Region},
 };
+use resy::{Change, s3::S3};
 use testcontainers::{GenericImage, core::WaitFor, runners::AsyncRunner};
 use testcontainers::{ImageExt, core::ContainerPort};
 use tokio_stream::StreamExt;
@@ -195,4 +196,76 @@ async fn test_stream_stops_at_first_error() {
         0,
         "Stream should stop after first error, no more items should be yielded"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_db_access() {
+    let localstack_port = 4566;
+    let container = GenericImage::new("localstack/localstack", "s3-latest")
+        .with_exposed_port(ContainerPort::Tcp(localstack_port))
+        .with_wait_for(WaitFor::message_on_stdout("Ready."))
+        .with_env_var("SERVICES", "s3")
+        .start()
+        .await
+        .unwrap();
+
+    let host = container.get_host().await.unwrap();
+    let host_port = container
+        .get_host_port_ipv4(ContainerPort::Tcp(localstack_port))
+        .await
+        .unwrap();
+    let endpoint_url = format!("http://{}:{}", host, host_port);
+
+    let credentials = Credentials::new("test", "test", None, None, "test");
+    let config = SdkConfig::builder()
+        .credentials_provider(SharedCredentialsProvider::new(credentials))
+        .endpoint_url(endpoint_url)
+        .region(Region::new("us-east-1"))
+        .behavior_version(BehaviorVersion::latest())
+        .build();
+
+    let s3_config = config::Builder::from(&config)
+        .force_path_style(true)
+        .build();
+
+    let s3_client = Client::from_conf(s3_config);
+
+    let bucket_name = "my-test-bucket";
+
+    s3_client
+        .create_bucket()
+        .bucket(bucket_name)
+        .send()
+        .await
+        .expect("Failed to create S3 bucket");
+
+    for i in 1..10 {
+        s3_client
+            .put_object()
+            .bucket(bucket_name)
+            .key(format!("test-{i}"))
+            .body(aws_sdk_s3::primitives::ByteStream::from(
+                format!("hello-{i}").as_bytes().to_vec(),
+            ))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let db_file = tempfile::NamedTempFile::new().unwrap();
+    let db_path = db_file.path();
+
+    let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), Some(1));
+
+    let stream1 = s3.stream_diff_and_update(db_path).await.unwrap();
+    let stream2 = s3.stream_diff_and_update(db_path).await;
+    assert!(stream2.is_err());
+    assert!(
+        stream2
+            .unwrap_err()
+            .to_string()
+            .contains("error returned from database: (code: 5) database is locked")
+    );
+
+    drop(stream1);
 }

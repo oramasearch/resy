@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Stream changes - database path is auto-generated as "{bucket}.db"
-    // Or specify custom path: s3.stream_changes(Some(Path::new("custom.db")))
-    let mut stream = s3.stream_changes(None).await.unwrap();
+    // Or specify custom path: s3.stream_changes(Some(Path::new("resy.db")))
+    let mut stream = s3.stream_changes("resy.db").await.unwrap();
 
     while let Some(result) = stream.next().await {
         match result {
