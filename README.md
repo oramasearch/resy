@@ -4,46 +4,52 @@
 
 ## Usage
 
-```rust
+### Basic Example
+
+```rust,no_run
+use resy::s3::S3;
+use resy::Change;
+use tokio_stream::StreamExt;
+
 #[tokio::main]
-  async fn main() -> Result<(), Box<dyn std::error::Error>> {
-      // Initialize S3 client
-      let s3 = S3::new(
-          "my-bucket".to_string(),
-          "AKIA...".to_string(),      // access_key_id
-          "secret...".to_string(),    // secret_access_key
-          "us-east-1".to_string(),    // region
-      );
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Build S3 client using the builder pattern
+    let s3 = S3::builder()
+        .bucket("my-bucket")
+        .region("us-east-1")
+        .credentials("AKIA...", "secret...")
+        .endpoint("http://localhost:4566") // Optional: for LocalStack/MinIO
+        .batch_size(500)                   // Optional: S3 pagination size (default: 1000)
+        .build()
+        .await?;
 
-      // Path to store state database
-      let db_path = "./bucket_state.db";
+    // Stream changes - database path is auto-generated as "{bucket}.db"
+    // Or specify custom path: s3.stream_changes(Some(Path::new("resy.db")))
+    let mut stream = s3.stream_changes("resy.db").await.unwrap();
 
-      // Track changes and handle each one
-      let stats = s3.stream_diff_and_update(db_path, |change| {
-          match change {
-              Change::Added(obj) => {
-                  println!("➕ Added: {} ({} bytes)", obj.key, obj.size);
-              }
-              Change::Modified { old, new } => {
-                  println!("🔄 Modified: {} ({} → {} bytes)",
-                      new.key, old.size, new.size);
-              }
-              Change::Deleted(obj) => {
-                  println!("❌ Deleted: {} ({} bytes)", obj.key, obj.size);
-              }
-          }
-          Ok(())
-      }).await?;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(change) => match change {
+                Change::Added(obj) => {
+                    println!("Added: {} ({} bytes)", obj.key, obj.size);
+                }
+                Change::Modified { old, new } => {
+                    println!("Modified: {} ({} -> {} bytes)",
+                        new.key, old.size, new.size);
+                }
+                Change::Deleted(obj) => {
+                    println!("Deleted: {} ({} bytes)", obj.key, obj.size);
+                }
+            },
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                break;
+            }
+        }
+    }
 
-      // Print summary
-      println!("\nSummary:");
-      println!("  Added: {}", stats.added);
-      println!("  Modified: {}", stats.modified);
-      println!("  Deleted: {}", stats.deleted);
-      println!("  Unchanged: {}", stats.unchanged);
-
-      Ok(())
-  }
+    Ok(())
+}
 ```
 
 ## Security
@@ -58,11 +64,11 @@ State persistence uses local SQLite databases with no network exposure, and the 
 
 Resy is designed for scalability across large buckets and frequent operations.
 
-It uses AWS S3's paginated `list_objects_v2` API with 1000-object batches and **continuation tokens** to handle buckets with millions of objects without memory exhaustion.
+It uses AWS S3's paginated `list_objects_v2` API with configurable batch sizes (default 1000 objects) and **continuation tokens** to handle buckets with millions of objects without memory exhaustion.
 
-The streaming architecture processes objects one-by-one rather than loading everything into memory, with progress reporting every 10,000 objects to provide visibility during long operations.
+The streaming architecture processes objects one-by-one rather than loading everything into memory, making it memory-efficient for large-scale operations.
 
-SQLite provides efficient local state persistence with indexed lookups on ETags for fast comparisons, while the temporary `temp_seen` column approach enables single-pass change detection without requiring multiple database scans.
+SQLite with **async sqlx** provides efficient local state persistence with indexed lookups on ETags for fast comparisons, while the temporary `temp_seen` column approach enables single-pass change detection without requiring multiple database scans.
 
 Database transactions ensure consistency during concurrent operations, and the compact storage format (storing only metadata, not file contents) keeps the state database lightweight even for buckets with terabytes of data, making the system suitable for enterprise-scale S3 monitoring and synchronization tasks.
 
