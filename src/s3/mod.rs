@@ -249,15 +249,7 @@ impl S3 {
         &self,
         db_path: P,
     ) -> Result<ChangeStream<Change>, crate::ResyError> {
-        let actual_db_path = db_path.into();
-        self.stream_diff_and_update(&actual_db_path).await
-    }
-
-    pub async fn stream_diff_and_update(
-        &self,
-        db_path: &Path,
-    ) -> Result<ChangeStream<Change>, crate::ResyError> {
-        let db_path = db_path.to_path_buf();
+        let db_path = db_path.into();
         let bucket = self.bucket.clone();
         let client = self.client.clone();
         let batch_size = self.batch_size;

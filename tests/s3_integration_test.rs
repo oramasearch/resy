@@ -44,7 +44,7 @@ async fn setup_localstack_s3() -> (ContainerAsync<GenericImage>, Client) {
 }
 
 #[tokio::test]
-async fn test_stream_diff_and_update() {
+async fn test_stream_changes() {
     let (_container, s3_client) = setup_localstack_s3().await;
 
     let bucket_name = "my-test-bucket";
@@ -72,7 +72,7 @@ async fn test_stream_diff_and_update() {
     let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), None);
 
     // 1. Initial check: No changes
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -93,7 +93,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -121,7 +121,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -146,7 +146,7 @@ async fn test_stream_diff_and_update() {
         .await
         .unwrap();
 
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut changes = Vec::new();
     while let Some(result) = stream.next().await {
         changes.push(result.unwrap());
@@ -180,7 +180,7 @@ async fn test_stream_stops_at_first_error() {
     let db_file = tempfile::NamedTempFile::new().unwrap();
     let db_path = db_file.path();
 
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut error_occurred = false;
 
     while let Some(result) = stream.next().await {
@@ -234,8 +234,8 @@ async fn test_concurrent_db_access() {
 
     let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), Some(1));
 
-    let stream1 = s3.stream_diff_and_update(db_path).await.unwrap();
-    let stream2 = s3.stream_diff_and_update(db_path).await;
+    let stream1 = s3.stream_changes(db_path).await.unwrap();
+    let stream2 = s3.stream_changes(db_path).await;
     assert!(stream2.is_err());
     assert!(
         stream2
@@ -279,7 +279,7 @@ async fn test_per_batch_commit_crash_recovery() {
     let s3 = resy::s3::S3::from_client(s3_client.clone(), bucket_name.to_string(), Some(8));
 
     // First sync: Simulate a "crash" by only consuming first 10 changes
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut first_sync_changes = Vec::new();
     for _ in 0..10 {
         if let Some(result) = stream.next().await {
@@ -306,7 +306,7 @@ async fn test_per_batch_commit_crash_recovery() {
     // Second sync: Restart after "crash"
     // we should get 15 (remaining objects) + 2 (previous run - batch size)
     // we prefer to reprocess objects instead of silently ignoring them.
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut second_sync_changes = Vec::new();
     while let Some(result) = stream.next().await {
         second_sync_changes.push(result.unwrap());
@@ -321,7 +321,7 @@ async fn test_per_batch_commit_crash_recovery() {
     }
 
     // Third sync: Should report no changes since everything is synced
-    let mut stream = s3.stream_diff_and_update(db_path).await.unwrap();
+    let mut stream = s3.stream_changes(db_path).await.unwrap();
     let mut third_sync_changes = Vec::new();
     while let Some(result) = stream.next().await {
         third_sync_changes.push(result.unwrap());
