@@ -30,7 +30,7 @@ pub struct S3Object {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CompactS3Object {
     etag: String,
-    size: u64,
+    size: i64,
     last_modified: i64,
 }
 
@@ -206,7 +206,7 @@ impl S3 {
         }
     }
 
-    // Crate the sqlite db, it is acquired with Exclusive lock, so only one process can use
+    // Create the sqlite db, it is acquired with Exclusive lock, so only one process can use
     // the db at time. A transaction is not needed.
     pub async fn create_state_db(db_path: &Path) -> Result<SqliteConnection, sqlx::Error> {
         let options = SqliteConnectOptions::new()
@@ -345,7 +345,7 @@ impl S3 {
         S3Object {
             key: key.to_string(),
             etag: compact.etag.clone(),
-            size: compact.size as i64,
+            size: compact.size,
             last_modified: DateTime::from_timestamp(compact.last_modified, 0)
                 .unwrap_or_default()
                 .with_timezone(&Utc),
@@ -568,9 +568,9 @@ impl S3 {
 impl crate::DataSource for S3 {
     type Change = Change;
 
-    async fn stream_changes(
+    async fn stream_changes<P: Into<PathBuf> + Send>(
         &self,
-        db_path: PathBuf,
+        db_path: P,
     ) -> Result<ChangeStream<Self::Change>, crate::ResyError> {
         S3::stream_changes(self, db_path).await
     }

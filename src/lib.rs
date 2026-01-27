@@ -22,8 +22,8 @@ pub trait DataSource {
     /// Stream changes from the data source, using the specified database path for state tracking.
     ///
     /// If `db_path` is `None`, a default path will be generated based on the data source configuration.
-    fn stream_changes(
+    fn stream_changes<P: Into<PathBuf> + Send>(
         &self,
-        db_path: PathBuf,
+        db_path: P,
     ) -> impl Future<Output = Result<ChangeStream<Self::Change>, ResyError>> + Send;
 }
