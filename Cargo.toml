@@ -3,6 +3,10 @@ name = "resy"
 version = "0.1.0"
 edition = "2024"
 
+description="Remote Sync change detection lib. Currently supporting AWS S3 but possibly open to more sources. "
+homepage="https://orama.com/"
+repository="https://github.com/oramasearch/resy"
+
 [dependencies]
 aws-config = "1.8.6"
 aws-credential-types = "1.2.6"
