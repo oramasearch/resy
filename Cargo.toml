@@ -1,7 +1,8 @@
 [package]
 name = "resy"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+license-file = "LICENSE.md"
 
 description="Remote Sync change detection lib. Currently supporting AWS S3 but possibly open to more sources. "
 homepage="https://orama.com/"
